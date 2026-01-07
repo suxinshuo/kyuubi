@@ -20,6 +20,7 @@ package org.apache.kyuubi.plugin.lineage.helper
 import scala.collection.immutable.ListMap
 import scala.util.Try
 
+import org.apache.commons.lang3.StringUtils
 import org.apache.spark.internal.Logging
 import org.apache.spark.kyuubi.lineage.{LineageConf, SparkContextHelper}
 import org.apache.spark.sql.SparkSession
@@ -34,6 +35,7 @@ import org.apache.spark.sql.connector.catalog.{CatalogPlugin, Identifier, TableC
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.columnar.InMemoryRelation
 import org.apache.spark.sql.execution.datasources.LogicalRelation
+import org.apache.spark.sql.execution.datasources.jdbc.JDBCOptions
 import org.apache.spark.sql.execution.datasources.v2.{DataSourceV2Relation, DataSourceV2ScanRelation}
 
 import org.apache.kyuubi.plugin.lineage.Lineage
@@ -175,10 +177,20 @@ trait LineageParser {
       relationOutput: Seq[Attribute],
       relationColumnLineage: AttributeMap[AttributeSet]): AttributeMap[AttributeSet] = {
     val mergedRelationColumnLineage = {
-      relationOutput.foldLeft((ListMap[Attribute, AttributeSet](), relationColumnLineage)) {
-        case ((acc, x), attr) =>
-          (acc + (attr -> x.head._2), x.tail)
-      }._1
+      if (relationColumnLineage.isEmpty) {
+        // 如果 relationColumnLineage 为空, 则创建一个基于 relationOutput 的空映射
+        ListMap(relationOutput.map(attr => (attr, AttributeSet.empty)): _*)
+      } else {
+        relationOutput.foldLeft((ListMap[Attribute, AttributeSet](), relationColumnLineage)) {
+          case ((acc, x), attr) =>
+            // 添加安全检查
+            if (x.nonEmpty) {
+              (acc + (attr -> x.head._2), x.tail)
+            } else {
+              (acc + (attr -> AttributeSet.empty), x)
+            }
+        }._1
+      }
     }
     joinColumnsLineage(parentColumnsLineage, mergedRelationColumnLineage)
   }
@@ -415,6 +427,38 @@ trait LineageParser {
       case p: LogicalRelation if p.catalogTable.nonEmpty =>
         val tableName = getV1TableName(p.catalogTable.get.qualifiedName)
         joinRelationColumnLineage(parentColumnsLineage, p.output, Seq(tableName))
+
+      case p: LogicalRelation if p.relation != null && p.relation.getClass.getName ==
+        "org.apache.spark.sql.execution.datasources.jdbc.JDBCRelation" => {
+        val jdbcOptions = getField[JDBCOptions](p.relation, "jdbcOptions")
+
+        // TODO: 后续需要从 url 解析映射出来 catalog
+        val unknownTableName = "unknown"
+        val tableOrQuery = jdbcOptions.tableOrQuery
+        val dbTableName = if (!tableOrQuery.contains(".")) {
+          // 不包含. 表名, 库名从 url 上解析获取
+          val urlParts = StringUtils.split(jdbcOptions.url, "?")
+          if (urlParts != null && urlParts.nonEmpty) {
+            val url = urlParts(0)
+            val urlSegments = StringUtils.split(url, "/")
+            if (urlSegments != null && urlSegments.nonEmpty) {
+              val dbName = urlSegments.last
+              dbName + "." + tableOrQuery
+            } else {
+              unknownTableName
+            }
+          } else {
+            unknownTableName
+          }
+        } else if (tableOrQuery.split("\\.").length == 2) {
+          // tableOrQuery 只包含1个 ".", 这里就是库表名称
+          tableOrQuery
+        } else {
+          unknownTableName
+        }
+
+        joinRelationColumnLineage(parentColumnsLineage, p.output, Seq(dbTableName))
+      }
 
       case p: HiveTableRelation =>
         val tableName = getV1TableName(p.tableMeta.qualifiedName)

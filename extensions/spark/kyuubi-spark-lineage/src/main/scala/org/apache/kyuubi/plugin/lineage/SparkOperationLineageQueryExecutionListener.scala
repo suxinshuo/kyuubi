@@ -17,6 +17,8 @@
 
 package org.apache.kyuubi.plugin.lineage
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import org.apache.spark.kyuubi.lineage.{LineageConf, SparkContextHelper}
 import org.apache.spark.sql.execution.QueryExecution
 import org.apache.spark.sql.util.QueryExecutionListener
@@ -32,6 +34,15 @@ class SparkOperationLineageQueryExecutionListener extends QueryExecutionListener
   override def onSuccess(funcName: String, qe: QueryExecution, durationNs: Long): Unit = {
     val lineage =
       SparkSQLLineageParseHelper(qe.sparkSession).transformToLineage(qe.id, qe.analyzed)
+
+    // scalastyle:off println
+    println("**************** lineage start ****************")
+    val mapper = new ObjectMapper()
+    mapper.registerModule(DefaultScalaModule)
+    println(mapper.writeValueAsString(lineage))
+    println("**************** lineage end ****************")
+    // scalastyle:on println
+
     dispatchers.foreach(_.send(qe, lineage))
   }
 
